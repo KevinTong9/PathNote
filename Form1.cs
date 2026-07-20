@@ -15,7 +15,14 @@ public partial class Form1 : Form
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
     private const int SW_SHOWNOACTIVATE = 4;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOZORDER = 0x0004;
+    private const uint SWP_NOACTIVATE = 0x0010;
 
     private const int WM_CLIPBOARDUPDATE = 0x031D;
     private const string PathsFile = "paths.json";
@@ -93,10 +100,14 @@ public partial class Form1 : Form
 
         if (string.IsNullOrEmpty(path)) return;
 
-        try { path = Path.GetFullPath(path); }
+        try
+        {
+            var fullPath = Path.GetFullPath(path);
+            if (Directory.Exists(fullPath))
+                fullPath = Path.TrimEndingDirectorySeparator(fullPath) + Path.DirectorySeparatorChar;
+            path = fullPath;
+        }
         catch { return; }
-
-        if (!File.Exists(path) && !Directory.Exists(path)) return;
 
         if (InvokeRequired)
             Invoke(() => AddPath(path));
@@ -104,18 +115,23 @@ public partial class Form1 : Form
             AddPath(path);
     }
 
+    private static string NormalizePath(string path) =>
+        Path.TrimEndingDirectorySeparator(path ?? "");
+
     private void AddPath(string path)
     {
+        var normalized = NormalizePath(path);
+
         var existing = flowPanel.Controls
             .Cast<Control>()
-            .FirstOrDefault(c => c.Tag?.ToString() == path);
+            .FirstOrDefault(c => NormalizePath(c.Tag?.ToString() ?? "") == normalized);
 
         if (existing != null)
         {
-            if (!pinnedPaths.Contains(path))
+            if (!pinnedPaths.Contains(normalized))
             {
                 var pinnedItemCount = flowPanel.Controls
-                    .Cast<Control>().Count(c => pinnedPaths.Contains(c.Tag?.ToString() ?? ""));
+                    .Cast<Control>().Count(c => pinnedPaths.Contains(NormalizePath(c.Tag?.ToString() ?? "")));
                 var currentIndex = flowPanel.Controls.GetChildIndex(existing);
                 var targetIndex = pinnedItemCount;
                 if (currentIndex != targetIndex)
@@ -125,27 +141,36 @@ public partial class Form1 : Form
                 existing.BackColor = NormalHover;
             }
             SavePaths();
+            RestoreFromMinimized();
             return;
         }
 
         var item = CreatePathItem(path);
         var pinCount = flowPanel.Controls
-            .Cast<Control>().Count(c => pinnedPaths.Contains(c.Tag?.ToString() ?? ""));
+            .Cast<Control>().Count(c => pinnedPaths.Contains(NormalizePath(c.Tag?.ToString() ?? "")));
         flowPanel.Controls.Add(item);
         flowPanel.Controls.SetChildIndex(item, pinCount);
         SavePaths();
         RestoreFromMinimized();
     }
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
     private void RestoreFromMinimized()
     {
         if (WindowState != FormWindowState.Minimized) return;
+        var prevForeground = GetForegroundWindow();
         ShowWindow(Handle, SW_SHOWNOACTIVATE);
+        WindowState = FormWindowState.Normal;
+        if (prevForeground != IntPtr.Zero && prevForeground != Handle)
+            SetWindowPos(prevForeground, IntPtr.Zero, 0, 0, 0, 0,
+                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
     }
 
     private Button CreatePathItem(string path)
     {
-        var isPinned = pinnedPaths.Contains(path);
+        var isPinned = pinnedPaths.Contains(NormalizePath(path));
         var btn = new Button
         {
             Text = "",
@@ -168,7 +193,7 @@ public partial class Form1 : Form
             var text = (string?)b.Tag ?? "";
             var rect = new Rectangle(14, 0, b.ClientSize.Width - 18, b.ClientSize.Height);
 
-            if (pinnedPaths.Contains(text))
+            if (pinnedPaths.Contains(NormalizePath(text)))
             {
                 using var brush = new SolidBrush(Color.FromArgb(200, 150, 50));
                 e.Graphics.FillEllipse(brush, 5, b.ClientSize.Height / 2 - 3, 6, 6);
@@ -189,11 +214,11 @@ public partial class Form1 : Form
 
         btn.MouseEnter += (_, _) =>
         {
-            btn.BackColor = pinnedPaths.Contains(path) ? PinnedHover : NormalHover;
+            btn.BackColor = pinnedPaths.Contains(NormalizePath(path)) ? PinnedHover : NormalHover;
         };
         btn.MouseLeave += (_, _) =>
         {
-            btn.BackColor = pinnedPaths.Contains(path) ? PinnedBack : NormalBack;
+            btn.BackColor = pinnedPaths.Contains(NormalizePath(path)) ? PinnedBack : NormalBack;
         };
 
         btn.MouseUp += (_, e) =>
@@ -231,15 +256,16 @@ public partial class Form1 : Form
 
     private void TogglePin(Button btn)
     {
-        var path = btn.Tag?.ToString() ?? "";
-        if (string.IsNullOrEmpty(path)) return;
+        var display = btn.Tag?.ToString() ?? "";
+        var normalized = NormalizePath(display);
+        if (string.IsNullOrEmpty(normalized)) return;
 
-        if (pinnedPaths.Contains(path))
-            pinnedPaths.Remove(path);
+        if (pinnedPaths.Contains(normalized))
+            pinnedPaths.Remove(normalized);
         else
-            pinnedPaths.Add(path);
+            pinnedPaths.Add(normalized);
 
-        var isPinned = pinnedPaths.Contains(path);
+        var isPinned = pinnedPaths.Contains(normalized);
         btn.BackColor = isPinned ? PinnedBack : NormalBack;
         btn.FlatAppearance.MouseOverBackColor = isPinned ? PinnedHover : NormalHover;
         btn.Invalidate();
@@ -266,29 +292,43 @@ public partial class Form1 : Form
             return path;
         }
 
-        var prefix = path.StartsWith("\\\\") ? "\\\\" :
-                     path.Length >= 2 && path[1] == ':' ? path[..3] :
-                     path.StartsWith(sep.ToString()) ? sep.ToString() : "";
+        // Determine root prefix (e.g. "C:\" or "\\")
+        string root;
+        if (path.StartsWith("\\\\"))
+            root = "\\\\";
+        else if (path.Length >= 2 && path[1] == ':')
+            root = path[..3];
+        else if (path.StartsWith(sep.ToString()))
+            root = sep.ToString();
+        else
+            root = "";
 
+        // For short paths (<=2 segments), just use original path and truncate from front
         if (parts.Length <= 2)
         {
-            var display = prefix + string.Join(sep, parts);
+            var display = path;
             while (display.Length > 0 &&
                    TextRenderer.MeasureText(g, display, font, Size.Empty, TextFormatFlags.Default).Width > maxWidth)
                 display = display[1..];
             return display;
         }
 
-        var endText = string.Join(sep, parts[^2..]);
-        var baseText = ellipsis + sep + endText;
+        // >=3 segments: show last 2 segments as the tail
+        var tail = string.Join(sep, parts[^2..]);
+        var baseText = ellipsis + sep + tail;
 
         if (TextRenderer.MeasureText(g, baseText, font, Size.Empty, TextFormatFlags.Default).Width <= maxWidth)
         {
-            var middleParts = parts[..^2];
+            // Build the leading part from the root + middle segments
+            var rootLen = root.Length;
+            var body = path[rootLen..];                     // everything after root
+            var bodyParts = body.Split(sep, StringSplitOptions.RemoveEmptyEntries);
+            var middleCount = bodyParts.Length - 2;          // exclude last 2 tail segments
+
             var bestLeading = "";
-            for (var i = 0; i < middleParts.Length; i++)
+            for (var i = 0; i < middleCount; i++)
             {
-                var leading = prefix + string.Join(sep, middleParts[..(i + 1)]) + sep;
+                var leading = root + string.Join(sep, bodyParts[..(i + 1)]) + sep;
                 if (TextRenderer.MeasureText(g, leading + baseText, font, Size.Empty, TextFormatFlags.Default).Width <= maxWidth)
                     bestLeading = leading;
                 else
@@ -297,23 +337,24 @@ public partial class Form1 : Form
             return bestLeading + baseText;
         }
 
-        while (endText.Length > 1 &&
-               TextRenderer.MeasureText(g, ellipsis + sep + endText, font, Size.Empty, TextFormatFlags.Default).Width > maxWidth)
+        // Even the last 2 segments don't fit, shrink the tail from front
+        while (tail.Length > 1 &&
+               TextRenderer.MeasureText(g, ellipsis + sep + tail, font, Size.Empty, TextFormatFlags.Default).Width > maxWidth)
         {
-            var idx = endText.IndexOf(sep);
-            if (idx >= 0 && idx < endText.Length - 1)
-                endText = endText[(idx + 1)..];
+            var idx = tail.IndexOf(sep);
+            if (idx >= 0 && idx < tail.Length - 1)
+                tail = tail[(idx + 1)..];
             else
-                endText = endText[1..];
+                tail = tail[1..];
         }
 
-        return ellipsis + sep + endText;
+        return ellipsis + sep + tail;
     }
 
     private void RemovePath(Button btn)
     {
         flowPanel.Controls.Remove(btn);
-        pinnedPaths.Remove(btn.Tag?.ToString() ?? "");
+        pinnedPaths.Remove(NormalizePath(btn.Tag?.ToString() ?? ""));
         btn.Dispose();
         SavePaths();
     }
@@ -333,7 +374,7 @@ public partial class Form1 : Form
         {
             var c = flowPanel.Controls[0];
             flowPanel.Controls.RemoveAt(0);
-            pinnedPaths.Remove(c.Tag?.ToString() ?? "");
+            pinnedPaths.Remove(NormalizePath(c.Tag?.ToString() ?? ""));
             c.Dispose();
         }
         SavePaths();
@@ -372,7 +413,7 @@ public partial class Form1 : Form
                 .Cast<Control>()
                 .Select(c => c.Tag?.ToString())
                 .Where(p => !string.IsNullOrEmpty(p))
-                .Select(p => new PathEntry { Path = p!, IsPinned = pinnedPaths.Contains(p!) })
+                .Select(p => new PathEntry { Path = p!, IsPinned = pinnedPaths.Contains(NormalizePath(p!)) })
                 .ToList();
             File.WriteAllText(pathsFile, JsonSerializer.Serialize(entries));
         }
@@ -389,12 +430,17 @@ public partial class Form1 : Form
             if (entries == null) return;
             foreach (var entry in entries)
             {
-                if (!string.IsNullOrEmpty(entry.Path) && (File.Exists(entry.Path) || Directory.Exists(entry.Path)))
-                {
-                    if (entry.IsPinned)
-                        pinnedPaths.Add(entry.Path);
-                    flowPanel.Controls.Add(CreatePathItem(entry.Path));
-                }
+                var display = entry.Path ?? "";
+                var normalized = Path.TrimEndingDirectorySeparator(display);
+                if (string.IsNullOrEmpty(normalized)) continue;
+                if (!File.Exists(normalized) && !Directory.Exists(normalized)) continue;
+
+                if (Directory.Exists(normalized) && !normalized.EndsWith(Path.DirectorySeparatorChar))
+                    display = normalized + Path.DirectorySeparatorChar;
+
+                if (entry.IsPinned)
+                    pinnedPaths.Add(normalized);
+                flowPanel.Controls.Add(CreatePathItem(display));
             }
         }
         catch { }
