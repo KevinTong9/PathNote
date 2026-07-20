@@ -1,39 +1,55 @@
-﻿namespace PathNote
+﻿namespace PathNote;
+
+partial class Form1
 {
-    partial class Form1
+    private System.ComponentModel.IContainer components = null;
+    private NotifyIcon notifyIcon;
+    private ContextMenuStrip trayMenu;
+    private ToolStripMenuItem exitMenuItem;
+    private FlowLayoutPanel flowPanel;
+
+    protected override void Dispose(bool disposing)
     {
-        /// <summary>
-        ///  Required designer variable.
-        /// </summary>
-        private System.ComponentModel.IContainer components = null;
+        if (disposing && (components != null))
+            components.Dispose();
+        base.Dispose(disposing);
+    }
 
-        /// <summary>
-        ///  Clean up any resources being used.
-        /// </summary>
-        /// <param name="disposing">true if managed resources should be disposed; otherwise, false.</param>
-        protected override void Dispose(bool disposing)
-        {
-            if (disposing && (components != null))
-            {
-                components.Dispose();
-            }
-            base.Dispose(disposing);
-        }
+    private void InitializeComponent()
+    {
+        components = new System.ComponentModel.Container();
 
-        #region Windows Form Designer generated code
+        AutoScaleMode = AutoScaleMode.Font;
+        Text = "PathNote";
+        ClientSize = new Size(480, 760);
+        MinimumSize = new Size(300, 200);
+        MaximizeBox = false;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        StartPosition = FormStartPosition.Manual;
+        Opacity = 0.92;
+        BackColor = Color.FromArgb(248, 250, 252);
+        Icon = CreateAppIcon();
 
-        /// <summary>
-        ///  Required method for Designer support - do not modify
-        ///  the contents of this method with the code editor.
-        /// </summary>
-        private void InitializeComponent()
-        {
-            components = new System.ComponentModel.Container();
-            AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(800, 450);
-            Text = "Form1";
-        }
+        notifyIcon = new NotifyIcon(components);
+        notifyIcon.Text = "PathNote";
+        notifyIcon.Icon = CreateAppIcon();
+        notifyIcon.Visible = true;
+        notifyIcon.DoubleClick += NotifyIcon_DoubleClick;
 
-        #endregion
+        trayMenu = new ContextMenuStrip();
+        exitMenuItem = new ToolStripMenuItem("退出");
+        exitMenuItem.Click += (_, _) => ExitApp();
+        trayMenu.Items.Add(exitMenuItem);
+        notifyIcon.ContextMenuStrip = trayMenu;
+
+        flowPanel = new FlowLayoutPanel();
+        flowPanel.Dock = DockStyle.Fill;
+        flowPanel.FlowDirection = FlowDirection.TopDown;
+        flowPanel.WrapContents = false;
+        flowPanel.AutoScroll = true;
+        flowPanel.Padding = new Padding(4);
+        flowPanel.Resize += FlowPanel_Resize;
+
+        Controls.Add(flowPanel);
     }
 }
