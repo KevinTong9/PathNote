@@ -103,9 +103,18 @@ public partial class Form1 : Form
         try
         {
             var fullPath = Path.GetFullPath(path);
-            if (Directory.Exists(fullPath))
-                fullPath = Path.TrimEndingDirectorySeparator(fullPath) + Path.DirectorySeparatorChar;
-            path = fullPath;
+            if (File.Exists(fullPath))
+            {
+                path = fullPath;
+            }
+            else if (Directory.Exists(fullPath))
+            {
+                path = Path.TrimEndingDirectorySeparator(fullPath) + Path.DirectorySeparatorChar;
+            }
+            else
+            {
+                return;
+            }
         }
         catch { return; }
 
