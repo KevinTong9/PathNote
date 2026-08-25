@@ -18,6 +18,24 @@ public partial class Form1 : Form
     [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 
+    [DllImport("user32.dll")]
+    private static extern bool OpenClipboard(IntPtr hWndNewOwner);
+
+    [DllImport("user32.dll")]
+    private static extern bool CloseClipboard();
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetClipboardData(uint uFormat);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GlobalLock(IntPtr hMem);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool GlobalUnlock(IntPtr hMem);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GlobalSize(IntPtr hMem);
+
     private const int SW_SHOWNOACTIVATE = 4;
     private const uint SWP_NOSIZE = 0x0001;
     private const uint SWP_NOMOVE = 0x0002;
@@ -25,6 +43,8 @@ public partial class Form1 : Form
     private const uint SWP_NOACTIVATE = 0x0010;
 
     private const int WM_CLIPBOARDUPDATE = 0x031D;
+    private const uint CF_UNICODETEXT = 13;
+    private const uint CF_TEXT = 1;
     private const string PathsFile = "paths.json";
     private const string WindowFile = "window.json";
 
@@ -84,18 +104,29 @@ public partial class Form1 : Form
 
         string? path = null;
 
-        if (Clipboard.ContainsFileDropList())
+        try
         {
-            var files = Clipboard.GetFileDropList();
-            if (files.Count > 0)
-                path = files[0];
-        }
+            if (Clipboard.ContainsFileDropList())
+            {
+                var files = Clipboard.GetFileDropList();
+                if (files.Count > 0)
+                    path = files[0];
+            }
 
-        if (path == null && Clipboard.ContainsText())
+            if (path == null && Clipboard.ContainsText())
+            {
+                // 大量文本（大段文档内容等）不属于本程序的工作内容，直接忽略、整块不读；
+                // 只读取很短（≤ MaxPathChars 字符）的文本块，避免内存暴涨/崩溃，
+                // 也避免长时间占用剪贴板干扰复制源程序。
+                var text = ReadClipboardTextSmall();
+                if (!string.IsNullOrEmpty(text))
+                    path = text;
+            }
+        }
+        catch
         {
-            var text = Clipboard.GetText()?.Trim().Trim('"');
-            if (!string.IsNullOrEmpty(text))
-                path = text;
+            // 剪贴板正被其他程序占用（如源程序仍在写入）或格式异常时静默忽略，绝不崩溃
+            return;
         }
 
         if (string.IsNullOrEmpty(path)) return;
@@ -122,6 +153,61 @@ public partial class Form1 : Form
             Invoke(() => AddPath(path));
         else
             AddPath(path);
+    }
+
+    /// <summary>
+    /// 有界读取剪贴板文本：仅当文本块很小（≤ MaxPathChars 字符）时才读取并截断到首个 '\0'；
+    /// 超长内容（大段文本）直接返回 null 忽略。路径字符串不可能超过该上限。
+    /// </summary>
+    private static string? ReadClipboardTextSmall()
+    {
+        const int MaxPathChars = 4096;
+
+        if (!OpenClipboard(IntPtr.Zero)) return null;
+        try
+        {
+            var isUnicode = true;
+            var h = GetClipboardData(CF_UNICODETEXT);
+            if (h == IntPtr.Zero)
+            {
+                h = GetClipboardData(CF_TEXT);
+                isUnicode = false;
+            }
+            if (h == IntPtr.Zero) return null;
+
+            var byteSize = (int)GlobalSize(h);
+            var maxBytes = isUnicode ? MaxPathChars * 2 : MaxPathChars;
+            if (byteSize <= 1 || byteSize > maxBytes) return null;
+
+            var ptr = GlobalLock(h);
+            if (ptr == IntPtr.Zero) return null;
+            try
+            {
+                string text;
+                if (isUnicode)
+                {
+                    var chars = new char[byteSize / 2];
+                    Marshal.Copy(ptr, chars, 0, chars.Length);
+                    text = new string(chars);
+                }
+                else
+                {
+                    text = Marshal.PtrToStringAnsi(ptr, byteSize) ?? "";
+                }
+
+                var nul = text.IndexOf('\0');
+                if (nul >= 0) text = text[..nul];
+                return text.Trim().Trim('"');
+            }
+            finally
+            {
+                GlobalUnlock(h);
+            }
+        }
+        finally
+        {
+            CloseClipboard();
+        }
     }
 
     private static string NormalizePath(string path) =>
@@ -250,8 +336,6 @@ public partial class Form1 : Form
             else
                 CopyPath(p);
         };
-
-        btn.DoubleClick += (_, _) => OpenPath(path);
 
         return btn;
     }
@@ -397,18 +481,6 @@ public partial class Form1 : Form
                 Process.Start("explorer.exe", path);
             else if (File.Exists(path))
                 Process.Start("explorer.exe", $"/select,\"{path}\"");
-        }
-        catch { }
-    }
-
-    private static void OpenPath(string path)
-    {
-        try
-        {
-            if (Directory.Exists(path))
-                Process.Start("explorer.exe", path);
-            else if (File.Exists(path))
-                Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
         }
         catch { }
     }
