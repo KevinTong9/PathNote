@@ -16,7 +16,13 @@ public partial class Form1 : Form
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll")]
-    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+    [DllImport("user32.dll")]
+    private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
 
     [DllImport("user32.dll")]
     private static extern bool OpenClipboard(IntPtr hWndNewOwner);
@@ -37,16 +43,27 @@ public partial class Form1 : Form
     private static extern uint GlobalSize(IntPtr hMem);
 
     private const int SW_SHOWNOACTIVATE = 4;
-    private const uint SWP_NOSIZE = 0x0001;
-    private const uint SWP_NOMOVE = 0x0002;
-    private const uint SWP_NOZORDER = 0x0004;
-    private const uint SWP_NOACTIVATE = 0x0010;
+    private const int SW_MINIMIZE = 6;
 
     private const int WM_CLIPBOARDUPDATE = 0x031D;
+    private const int WM_HOTKEY = 0x0312;
     private const uint CF_UNICODETEXT = 13;
     private const uint CF_TEXT = 1;
     private const string PathsFile = "paths.json";
     private const string WindowFile = "window.json";
+
+    // 全局快捷键：Ctrl + Alt + `（反引号，VK_OEM_3）
+    // 选它的理由：左手单手可按；Ctrl+Alt 组合在 Windows / Office / VS Code / VS 里没有默认占用，
+    // 也避开了国内常驻软件的热键（微信 Alt+A、QQ Ctrl+Alt+A、QQ Ctrl+Alt+Z）；
+    // 而"Ctrl+Alt+字母"是 Office 的重灾区（Ctrl+Alt+M/D/N/F/S…），用反引号正好绕开。
+    // MOD_NOREPEAT：长按不连续触发。要换键只改下面两行即可。
+    private const int HotkeyId = 0x504E;                              // 'PN'
+    private const uint HotkeyModifiers = MOD_CONTROL | MOD_ALT | MOD_NOREPEAT;
+    private const uint HotkeyVk = 0xC0;                               // VK_OEM_3 = ` / ~
+
+    private const uint MOD_ALT = 0x0001;
+    private const uint MOD_CONTROL = 0x0002;
+    private const uint MOD_NOREPEAT = 0x4000;
 
     private static readonly Color NormalBack = Color.FromArgb(240, 245, 255);
     private static readonly Color PinnedBack = Color.FromArgb(255, 248, 220);
@@ -79,11 +96,20 @@ public partial class Form1 : Form
     {
         base.OnHandleCreated(e);
         AddClipboardFormatListener(Handle);
+
+        if (!RegisterHotKey(Handle, HotkeyId, HotkeyModifiers, HotkeyVk))
+        {
+            // 被别的程序占用了同一个组合键：不静默失败，用托盘气泡告知（不打断操作）
+            notifyIcon.BalloonTipTitle = "PathNote";
+            notifyIcon.BalloonTipText = "全局快捷键 Ctrl+Alt+` 注册失败，可能被其他程序占用。";
+            notifyIcon.ShowBalloonTip(4000);
+        }
     }
 
     protected override void OnHandleDestroyed(EventArgs e)
     {
         RemoveClipboardFormatListener(Handle);
+        UnregisterHotKey(Handle, HotkeyId);
         base.OnHandleDestroyed(e);
     }
 
@@ -91,6 +117,8 @@ public partial class Form1 : Form
     {
         if (m.Msg == WM_CLIPBOARDUPDATE)
             OnClipboardChanged();
+        else if (m.Msg == WM_HOTKEY && m.WParam.ToInt32() == HotkeyId)
+            ToggleWindowVisibility();
         base.WndProc(ref m);
     }
 
@@ -252,15 +280,53 @@ public partial class Form1 : Form
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
 
+    /// <summary>
+    /// 剪贴板捕获到新路径时"弹出但不打扰"：仅在窗口最小化时恢复显示；
+    /// 用户主动关闭到托盘造成的隐藏不打扰。
+    /// </summary>
     private void RestoreFromMinimized()
     {
         if (WindowState != FormWindowState.Minimized) return;
+        ShowWithoutActivating();
+    }
+
+    /// <summary>
+    /// 全局快捷键（Ctrl+Alt+`）：最小化 ←→ 前置 之间切换。
+    /// 两个方向都不改变用户当前正在使用的程序的焦点。
+    /// </summary>
+    private void ToggleWindowVisibility()
+    {
+        if (Visible && WindowState != FormWindowState.Minimized)
+            MinimizeKeepingForeground();
+        else
+            ShowWithoutActivating();
+    }
+
+    /// <summary>显示/前置窗口，但把焦点还给按下快捷键时所在的那个程序。</summary>
+    private void ShowWithoutActivating()
+    {
         var prevForeground = GetForegroundWindow();
-        ShowWindow(Handle, SW_SHOWNOACTIVATE);
-        WindowState = FormWindowState.Normal;
+
+        ShowWindow(Handle, SW_SHOWNOACTIVATE);          // 未激活地显示/还原
+        if (!Visible) Visible = true;                   // 从托盘隐藏状态恢复时同步 WinForms 内部状态
+        if (WindowState != FormWindowState.Normal)
+            WindowState = FormWindowState.Normal;       // WinForms 内部走 SW_RESTORE，会激活本窗口
+        RestoreForeground(prevForeground);              // …所以最后把焦点还回去
+    }
+
+    /// <summary>最小化窗口，并把焦点还给用户原来的程序（最小化本身会激活 Z 序里的下一个窗口）。</summary>
+    private void MinimizeKeepingForeground()
+    {
+        var prevForeground = GetForegroundWindow();
+        ShowWindow(Handle, SW_MINIMIZE);
+        RestoreForeground(prevForeground);
+    }
+
+    private void RestoreForeground(IntPtr prevForeground)
+    {
+        // prevForeground 等于自己：用户本来就在用 PathNote，交给系统自然激活下一个窗口即可
         if (prevForeground != IntPtr.Zero && prevForeground != Handle)
-            SetWindowPos(prevForeground, IntPtr.Zero, 0, 0, 0, 0,
-                SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
+            SetForegroundWindow(prevForeground);
     }
 
     private Button CreatePathItem(string path)
@@ -342,9 +408,20 @@ public partial class Form1 : Form
 
     private void CopyPath(string path)
     {
+        // 先举旗再写入：Windows 可能在 SetText 内部就同步派发 WM_CLIPBOARDUPDATE，
+        // 那时旗子必须已经是 true，否则会被当成"用户复制了新路径"而误处理。
+        var previousIgnore = ignoreNextClipboardChange;
         ignoreNextClipboardChange = true;
-        try { Clipboard.SetText(path); }
-        catch { }
+        try
+        {
+            Clipboard.SetText(path);
+        }
+        catch
+        {
+            // 剪贴板被其他程序占用等原因导致写入失败：必须把旗子放回去，
+            // 否则它会留在 true 状态，把用户下一次真实的复制静默吞掉。
+            ignoreNextClipboardChange = previousIgnore;
+        }
     }
 
     private void TogglePin(Button btn)
