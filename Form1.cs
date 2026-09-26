@@ -261,7 +261,11 @@ public partial class Form1 : Form
                 {
                     flowPanel.Controls.SetChildIndex(existing, targetIndex);
                 }
-                existing.BackColor = NormalHover;
+                // 位置调好之后要把底色恢复正确：原来固定写 NormalHover，
+                // 鼠标不划过就一直是"悬停"色，看着像卡住了。
+                // （只有未标定的重复项会走到这里，所以用 Normal* 两种底色即可）
+                var pointerInside = existing.ClientRectangle.Contains(existing.PointToClient(Cursor.Position));
+                existing.BackColor = pointerInside ? NormalHover : NormalBack;
             }
             SavePaths();
             RestoreFromMinimized();
@@ -573,9 +577,21 @@ public partial class Form1 : Form
                 .Where(p => !string.IsNullOrEmpty(p))
                 .Select(p => new PathEntry { Path = p!, IsPinned = pinnedPaths.Contains(NormalizePath(p!)) })
                 .ToList();
-            File.WriteAllText(pathsFile, JsonSerializer.Serialize(entries));
+            WriteFileAtomic(pathsFile, JsonSerializer.Serialize(entries));
         }
         catch { }
+    }
+
+    /// <summary>
+    /// 原子写配置：先写同目录的 .tmp，再改名顶替。
+    /// 直接 File.WriteAllText 覆盖时若进程中途死掉，文件会只剩半截，
+    /// 整个路径列表就没了；同卷内 File.Move(overwrite) 是原子替换。
+    /// </summary>
+    private static void WriteFileAtomic(string path, string content)
+    {
+        var tmp = path + ".tmp";
+        File.WriteAllText(tmp, content);
+        File.Move(tmp, path, overwrite: true);
     }
 
     private void LoadPaths()
@@ -650,15 +666,49 @@ public partial class Form1 : Form
             if (!File.Exists(windowFile)) return;
             var cfg = JsonSerializer.Deserialize<WindowConfig>(File.ReadAllText(windowFile));
             if (cfg == null) return;
-            if (cfg.Width > 0 && cfg.Height > 0)
-                Size = new Size(cfg.Width, cfg.Height);
-            if (cfg.X >= 0 && cfg.Y >= 0)
-            {
-                StartPosition = FormStartPosition.Manual;
-                Location = new Point(cfg.X, cfg.Y);
-            }
+
+            var width = cfg.Width > 0 ? cfg.Width : Width;
+            var height = cfg.Height > 0 ? cfg.Height : Height;
+
+            // 保存下来的坐标可能属于一块已经拔掉/改了分辨率的显示器，
+            // 那样窗口会恢复到看不见的地方，用户只能删 window.json 才能救回来。
+            var bounds = ClampToVisibleScreen(new Rectangle(cfg.X, cfg.Y, width, height));
+            Size = new Size(bounds.Width, bounds.Height);
+            StartPosition = FormStartPosition.Manual;
+            Location = bounds.Location;
         }
         catch { }
+    }
+
+    /// <summary>
+    /// 把窗口位置夹回"现在仍然存在"的屏幕：只要标题栏在某块屏幕的工作区里
+    /// 露出足够宽度就原样保留（含副屏、负坐标等正常多显示器布局），
+    /// 否则挪到主屏工作区左上角。
+    /// </summary>
+    private static Rectangle ClampToVisibleScreen(Rectangle bounds)
+    {
+        const int MinVisibleWidth = 80;   // 标题栏至少要露出这么宽，才拖得回来
+        const int TitleBarHeight = 32;
+
+        foreach (var screen in Screen.AllScreens)
+        {
+            var wa = screen.WorkingArea;
+
+            var visibleWidth = Math.Min(bounds.Right, wa.Right) - Math.Max(bounds.Left, wa.Left);
+            if (visibleWidth < MinVisibleWidth) continue;
+
+            var visibleCaptionHeight = Math.Min(bounds.Top + TitleBarHeight, wa.Bottom) - Math.Max(bounds.Top, wa.Top);
+            if (visibleCaptionHeight < TitleBarHeight / 2) continue;
+
+            return bounds;
+        }
+
+        var primary = (Screen.PrimaryScreen ?? Screen.AllScreens[0]).WorkingArea;
+        return new Rectangle(
+            primary.Left + 40,
+            primary.Top + 40,
+            Math.Min(bounds.Width, primary.Width),
+            Math.Min(bounds.Height, primary.Height));
     }
 
     private void SaveWindowBounds()
@@ -668,7 +718,7 @@ public partial class Form1 : Form
             if (WindowState != FormWindowState.Normal) return;
             Directory.CreateDirectory(dataDir);
             var cfg = new WindowConfig { Width = Width, Height = Height, X = Left, Y = Top };
-            File.WriteAllText(windowFile, JsonSerializer.Serialize(cfg));
+            WriteFileAtomic(windowFile, JsonSerializer.Serialize(cfg));
         }
         catch { }
     }
