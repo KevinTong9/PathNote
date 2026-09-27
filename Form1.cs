@@ -607,8 +607,11 @@ public partial class Form1 : Form
                 var display = entry.Path ?? "";
                 var normalized = Path.TrimEndingDirectorySeparator(display);
                 if (string.IsNullOrEmpty(normalized)) continue;
-                if (!File.Exists(normalized) && !Directory.Exists(normalized)) continue;
 
+                // 目标当前不可达（移动硬盘没插、网络盘没连、盘符变了）也要保留这一条。
+                // 保存是"整表覆盖"，一旦在这里 continue 把它丢掉，之后任何一次保存
+                // （复制/删除/标定）都会把它从 paths.json 里永久删除，插回硬盘也回不来。
+                // 能不能打开是点击那一刻现查的（见 OpenInExplorer），所以保留它没有副作用。
                 if (Directory.Exists(normalized) && !normalized.EndsWith(Path.DirectorySeparatorChar))
                     display = normalized + Path.DirectorySeparatorChar;
 
