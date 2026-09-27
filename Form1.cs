@@ -69,6 +69,8 @@ public partial class Form1 : Form
     private static readonly Color PinnedBack = Color.FromArgb(255, 248, 220);
     private static readonly Color NormalHover = Color.FromArgb(220, 235, 255);
     private static readonly Color PinnedHover = Color.FromArgb(255, 240, 200);
+    private static readonly Color NormalFore = Color.FromArgb(30, 30, 30);
+    private static readonly Color OfflineFore = Color.FromArgb(150, 150, 150);   // 目标当前够不着的条目
 
     private readonly string dataDir;
     private readonly string pathsFile;
@@ -76,6 +78,10 @@ public partial class Form1 : Form
     private bool forceClose;
     private bool ignoreNextClipboardChange;
     private readonly HashSet<string> pinnedPaths = new();
+
+    // 目标当前不可达（离线）的路径，只用于把条目文字显示成灰色。
+    // 与条目是否保留无关——保留离线条目是 LoadPaths 的刻意行为，见那里的注释。
+    private readonly HashSet<string> unavailablePaths = new();
 
     public Form1()
     {
@@ -343,7 +349,7 @@ public partial class Form1 : Form
             FlatStyle = FlatStyle.Flat,
             FlatAppearance = { BorderSize = 1, MouseOverBackColor = isPinned ? PinnedHover : NormalHover },
             BackColor = isPinned ? PinnedBack : NormalBack,
-            ForeColor = Color.FromArgb(30, 30, 30),
+            ForeColor = unavailablePaths.Contains(NormalizePath(path)) ? OfflineFore : NormalFore,
             Font = new Font("Microsoft YaHei UI", 10, FontStyle.Bold),
             Tag = path,
             Cursor = Cursors.Hand,
@@ -400,7 +406,7 @@ public partial class Form1 : Form
             if (e.Button != MouseButtons.Left) return;
             var p = btn.Tag?.ToString() ?? "";
             if (Control.ModifierKeys == Keys.Control)
-                OpenInExplorer(p);
+                RefreshAvailability(btn, OpenInExplorer(p));
             else if (Control.ModifierKeys == Keys.Shift)
                 TogglePin(btn);
             else
@@ -408,6 +414,23 @@ public partial class Form1 : Form
         };
 
         return btn;
+    }
+
+    /// <summary>
+    /// 刷新条目的"可用 / 离线"灰显状态。只在 Ctrl+左键 点击时更新一次：
+    /// 目标恢复了就自动恢复正常色，够不着就变灰——不做轮询，
+    /// 也绝不在 Paint/Resize 里查盘（断开的网络路径会把 UI 冻住）。
+    /// </summary>
+    private void RefreshAvailability(Button btn, bool available)
+    {
+        var normalized = NormalizePath(btn.Tag?.ToString() ?? "");
+        if (string.IsNullOrEmpty(normalized)) return;
+
+        var changed = available ? unavailablePaths.Remove(normalized) : unavailablePaths.Add(normalized);
+        if (!changed) return;
+
+        btn.ForeColor = available ? NormalFore : OfflineFore;
+        btn.Invalidate();
     }
 
     private void CopyPath(string path)
@@ -554,16 +577,25 @@ public partial class Form1 : Form
         SavePaths();
     }
 
-    private static void OpenInExplorer(string path)
+    /// <summary>在资源管理器中打开路径；返回目标此刻是否真的存在（供灰显状态刷新用）。</summary>
+    private static bool OpenInExplorer(string path)
     {
+        var exists = false;
         try
         {
             if (Directory.Exists(path))
+            {
+                exists = true;
                 Process.Start("explorer.exe", path);
+            }
             else if (File.Exists(path))
+            {
+                exists = true;
                 Process.Start("explorer.exe", $"/select,\"{path}\"");
+            }
         }
         catch { }
+        return exists;
     }
 
     private void SavePaths()
@@ -614,6 +646,8 @@ public partial class Form1 : Form
                 // 能不能打开是点击那一刻现查的（见 OpenInExplorer），所以保留它没有副作用。
                 if (Directory.Exists(normalized) && !normalized.EndsWith(Path.DirectorySeparatorChar))
                     display = normalized + Path.DirectorySeparatorChar;
+                else if (!File.Exists(normalized))
+                    unavailablePaths.Add(normalized);   // 当前够不着 → 灰显，但条目照旧保留
 
                 if (entry.IsPinned)
                     pinnedPaths.Add(normalized);
