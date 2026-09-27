@@ -16,6 +16,9 @@ public partial class Form1 : Form
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
     [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll")]
     private static extern bool SetForegroundWindow(IntPtr hWnd);
 
     [DllImport("user32.dll")]
@@ -44,6 +47,13 @@ public partial class Form1 : Form
 
     private const int SW_SHOWNOACTIVATE = 4;
     private const int SW_MINIMIZE = 6;
+
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOACTIVATE = 0x0010;
+
+    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
 
     private const int WM_CLIPBOARDUPDATE = 0x031D;
     private const int WM_HOTKEY = 0x0312;
@@ -321,7 +331,26 @@ public partial class Form1 : Form
         if (!Visible) Visible = true;                   // 从托盘隐藏状态恢复时同步 WinForms 内部状态
         if (WindowState != FormWindowState.Normal)
             WindowState = FormWindowState.Normal;       // WinForms 内部走 SW_RESTORE，会激活本窗口
-        RestoreForeground(prevForeground);              // …所以最后把焦点还回去
+        RestoreForeground(prevForeground);              // …所以先把焦点还给用户原来的程序
+        RaiseToTopWithoutActivating();                  // 再把它提到 Z 序最前（只动 Z 序，不动焦点）
+    }
+
+    /// <summary>
+    /// 把窗口提到 Z 序最前但**不激活**它，焦点仍留在用户原来的程序上。
+    ///
+    /// 实测结论（本机，前台窗口属于外部进程 msedge 时）：
+    ///   · ShowWindow(SW_SHOWNOACTIVATE) 只把窗口还原到它原来那一层，不动 Z 序；
+    ///   · SetWindowPos(HWND_TOP, SWP_NOACTIVATE) **完全无效**——被前台窗口压着时
+    ///     Z 序不变（前台窗口保护），所以看起来像"在当前层和最底层之间切换"；
+    ///   · 先临时置 topmost 再退回非 topmost 才可靠：topmost 层永远在所有普通窗口之上，
+    ///     不受前台窗口保护影响；HWND_NOTOPMOST 又会把它放在所有普通窗口的最前，
+    ///     且不会长期占据 topmost 层。两次调用紧邻，肉眼看不到闪烁。
+    /// 全程 SWP_NOACTIVATE，所以不抢焦点。
+    /// </summary>
+    private void RaiseToTopWithoutActivating()
+    {
+        SetWindowPos(Handle, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetWindowPos(Handle, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     /// <summary>最小化窗口，并把焦点还给用户原来的程序（最小化本身会激活 Z 序里的下一个窗口）。</summary>
