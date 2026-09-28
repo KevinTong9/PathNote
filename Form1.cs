@@ -307,7 +307,7 @@ public partial class Form1 : Form
     private void RestoreFromMinimized()
     {
         if (WindowState != FormWindowState.Minimized) return;
-        ShowWithoutActivating();
+        ShowWithoutActivating(raiseToTop: false);       // 复制触发的弹出保持低调，不挤到最前
     }
 
     /// <summary>
@@ -319,11 +319,15 @@ public partial class Form1 : Form
         if (Visible && WindowState != FormWindowState.Minimized)
             MinimizeKeepingForeground();
         else
-            ShowWithoutActivating();
+            ShowWithoutActivating(raiseToTop: true);    // 用户主动按键：必须看得见
     }
 
-    /// <summary>显示/前置窗口，但把焦点还给按下快捷键时所在的那个程序。</summary>
-    private void ShowWithoutActivating()
+    /// <summary>
+    /// 显示/前置窗口，但把焦点还给用户原来的那个程序。
+    /// <paramref name="raiseToTop"/> 决定是否把它提到所有普通窗口最前：
+    /// 只有用户主动按快捷键才置顶；剪贴板触发的自动弹出保持低调。
+    /// </summary>
+    private void ShowWithoutActivating(bool raiseToTop)
     {
         var prevForeground = GetForegroundWindow();
 
@@ -332,7 +336,8 @@ public partial class Form1 : Form
         if (WindowState != FormWindowState.Normal)
             WindowState = FormWindowState.Normal;       // WinForms 内部走 SW_RESTORE，会激活本窗口
         RestoreForeground(prevForeground);              // …所以先把焦点还给用户原来的程序
-        RaiseToTopWithoutActivating();                  // 再把它提到 Z 序最前（只动 Z 序，不动焦点）
+        if (raiseToTop)
+            RaiseToTopWithoutActivating();              // 再把它提到最前（只动 Z 序，不动焦点）
     }
 
     /// <summary>
